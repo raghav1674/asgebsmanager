@@ -15,10 +15,9 @@ class AsgEbsManager:
     def __get_name():
         return 'AsgEbsManager'
     
-    def latest_volume(self,az,state=None):
+    def latest_volume(self,az=None,state=None):
         status = ["available","in-use"] if state is None else [state]
-        volumes = self.ec2_client.describe_volumes(
-            Filters=[
+        filters = [
                 {
                     'Name': 'tag:BelongsTo',
                     'Values': [
@@ -32,16 +31,19 @@ class AsgEbsManager:
                     ]
                 },
                 {
+                    'Name': 'status',
+                    'Values': status
+                }
+            ]
+        if az is not None:
+            filters.append({
                     'Name': 'availability-zone',
                     'Values': [
                         az,
                     ]
-                },
-                {
-                    'Name': 'status',
-                    'Values': status
-                }
-            ],
+            })
+        volumes = self.ec2_client.describe_volumes(
+            Filters=filters,
             MaxResults=100
         )
 
@@ -127,51 +129,89 @@ class AsgEbsManager:
         )
 
 def manage_ebs(args):
-    asg_ebs_manager = AsgEbsManager(region=args.region,asg_name=args.asg_name)
+    try: 
+        asg_ebs_manager = AsgEbsManager(region=args.region,asg_name=args.asg_name)
 
-    # get the current instance az and id
-    mds_token = get_imds_token()
+        # get the current instance az and id
+        mds_token = get_imds_token()
 
-    az =  get_instance_metadata(mds_token,"placement/availability-zone")
-    instance_id =  get_instance_metadata(mds_token,"instance-id")
+        az =  get_instance_metadata(mds_token,"placement/availability-zone")
+        instance_id =  get_instance_metadata(mds_token,"instance-id")
 
-    volume_id = asg_ebs_manager.latest_volume(az)
-    # if volume_id is not None, there is chance we can get the available volume
-    if volume_id is not None:
-        # find the available volume
-        volume_id = asg_ebs_manager.latest_volume(az,'available')
-        # wait for some other volume to be available
-        max_retries = args.check_timeout
-        while volume_id is None and max_retries > 0:
-                sleep(60)
-                volume_id = asg_ebs_manager.latest_volume(az,'available')
-                max_retries -= 1
-        if max_retries == 0:
-            volume_id = None
-    
-    # check the difference in the volume configuration and if there is a diff, 
-    # create a new volume from the snapshot of the existing volume and
-    # delete the older volume
-    if volume_id:
-        volume = asg_ebs_manager.describe_volume(volume_id)
-        snapshot_id = None
-        if volume['Size'] != args.size or volume['Iops'] != args.iops or volume['Throughput'] != args.throughput:
-            snapshot_id = asg_ebs_manager.create_snapshot(volume_id)
-            snapshot = asg_ebs_manager.describe_snapshot(snapshot_id)
+        volume_id = asg_ebs_manager.latest_volume(az)
+        # if volume_id is not None, there is chance we can get the available volume
+        if volume_id is not None:
+            # find the available volume
+            volume_id = asg_ebs_manager.latest_volume(az,'available')
+            # wait for some other volume to be available
             max_retries = args.check_timeout
-            while snapshot['State'] != 'completed' and max_retries > 0:
-                sleep(60)
-                max_retries -= 1
-                snapshot = asg_ebs_manager.describe_snapshot(snapshot_id)
-            # if snapshot is not getting created, attach the same volume
+            while volume_id is None and max_retries > 0:
+                    sleep(60)
+                    volume_id = asg_ebs_manager.latest_volume(az,'available')
+                    max_retries -= 1
             if max_retries == 0:
-                snapshot_id = None
+                volume_id = None
 
-        # if the snapshot is created, create a new volume
-        if snapshot_id:
-            old_volume_id = volume_id
-            asg_ebs_manager.tag_resource(snapshot_id)
-            volume_id = asg_ebs_manager.create_volume(az,args.size,args.iops,args.throughput,snapshot_id=snapshot_id)
+        az_diff = False
+
+        # try to find an available volume in other azs and create snapshot 
+        if volume_id is None:
+            volume_id = asg_ebs_manager.latest_volume()
+            # if volume_id is not None, there is chance we can get the available volume
+            if volume_id is not None:
+                # find the available volume
+                volume_id = asg_ebs_manager.latest_volume(state='available')
+                # wait for some other volume to be available
+                max_retries = args.check_timeout
+                while volume_id is None and max_retries > 0:
+                        sleep(60)
+                        volume_id = asg_ebs_manager.latest_volume(state='available')
+                        max_retries -= 1
+                if max_retries == 0:
+                    volume_id = None
+                if volume_id is not None:
+                    az_diff = True
+
+        # only if 'force' is enabled
+        # check the difference in the volume configuration and if there is a diff, 
+        # create a new volume from the snapshot of the existing volume and
+        # delete the older volume 
+        if volume_id and args.force:
+            volume = asg_ebs_manager.describe_volume(volume_id)
+            snapshot_id = None
+            if volume['Size'] != args.size or volume['Iops'] != args.iops or volume['Throughput'] != args.throughput or az_diff:
+                snapshot_id = asg_ebs_manager.create_snapshot(volume_id)
+                snapshot = asg_ebs_manager.describe_snapshot(snapshot_id)
+                max_retries = args.check_timeout
+                while snapshot['State'] != 'completed' and max_retries > 0:
+                    sleep(60)
+                    max_retries -= 1
+                    snapshot = asg_ebs_manager.describe_snapshot(snapshot_id)
+                # if snapshot is not getting created, attach the same volume
+                if max_retries == 0:
+                    snapshot_id = None
+
+            # if the snapshot is created, create a new volume
+            if snapshot_id:
+                old_volume_id = volume_id
+                asg_ebs_manager.tag_resource(snapshot_id)
+                volume_id = asg_ebs_manager.create_volume(az,args.size,args.iops,args.throughput,snapshot_id=snapshot_id)
+                max_retries = args.check_timeout
+                volume = asg_ebs_manager.describe_volume(volume_id)
+                while volume['State'] != 'available' and max_retries > 0:
+                    sleep(60)
+                    max_retries -= 1
+                    volume = asg_ebs_manager.describe_volume(volume_id)
+                if max_retries == 0:
+                    volume_id = None
+                if args.delete:
+                    asg_ebs_manager.delete_volume(old_volume_id)
+                    asg_ebs_manager.delete_snapshot(snapshot_id)
+                az_diff = False
+                
+        # In this case , we cannot do anything other than creating a new volume
+        if volume_id is None: 
+            volume_id = asg_ebs_manager.create_volume(az,args.size,args.iops,args.throughput)
             max_retries = args.check_timeout
             volume = asg_ebs_manager.describe_volume(volume_id)
             while volume['State'] != 'available' and max_retries > 0:
@@ -180,42 +220,38 @@ def manage_ebs(args):
                 volume = asg_ebs_manager.describe_volume(volume_id)
             if max_retries == 0:
                 volume_id = None
-            if args.delete:
-                asg_ebs_manager.delete_volume(old_volume_id)
-                asg_ebs_manager.delete_snapshot(snapshot_id)
+
+
+        # if we are able to create/ reuse old volume in the same az, attach the volume to the instance and tag it
+        if volume_id is not None and not az_diff:
+            volume_id = asg_ebs_manager.attach_volume(volume_id,instance_id,args.device)
+            max_retries = args.check_timeout
+            volume = asg_ebs_manager.describe_volume(volume_id)
+            while volume['State'] != 'in-use' and max_retries > 0:
+                sleep(60)
+                max_retries -= 1
+                volume = asg_ebs_manager.describe_volume(volume_id)
+            if max_retries == 0:
+                volume_id = None
             
+            # if we are able to attach volume successfully to the instance, tag the volume 
+            if volume_id is not None:
+                asg_ebs_manager.tag_resource(volume_id)
+                return
 
+    # catch all 
+    except Exception as e:
+        print(f'Some error occurred :: {e}')
 
-    # In this case , we cannot do anything other than creating a new volume
-    if volume_id is None and args.force: 
-        volume_id = asg_ebs_manager.create_volume(az,args.size,args.iops,args.throughput)
-        max_retries = args.check_timeout
-        volume = asg_ebs_manager.describe_volume(volume_id)
-        while volume['State'] != 'available' and max_retries > 0:
-            sleep(60)
-            max_retries -= 1
-            volume = asg_ebs_manager.describe_volume(volume_id)
-        if max_retries == 0:
-            volume_id = None
-
-
-    # if we are able to create/ reuse old volume, attach the volume to the instance and tag it
-    if volume_id is not None:
-        volume_id = asg_ebs_manager.attach_volume(volume_id,instance_id,args.device)
-        max_retries = args.check_timeout
-        volume = asg_ebs_manager.describe_volume(volume_id)
-        while volume['State'] != 'in-use' and max_retries > 0:
-            sleep(60)
-            max_retries -= 1
-            volume = asg_ebs_manager.describe_volume(volume_id)
-        if max_retries == 0:
-            volume_id = None
-        
-        # if we are able to attach volume successfully to the instance, tag the volume 
-        if volume_id is not None:
-            asg_ebs_manager.tag_resource(volume_id)
-            return
-
+    # cleanup
+    try:
+        if snapshot_id:
+            asg_ebs_manager.delete_snapshot(snapshot_id)
+        if volume_id:
+            asg_ebs_manager.delete_volume(volume_id)
+    except Exception as e:
+        pass
+    
     # Exiting because we were not able to create or attach volume successfully
     exit(1)
 
