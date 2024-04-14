@@ -1,0 +1,9 @@
+dist/
+asgenv/
+*.egg-info
+steps.txt
+usage
+01.py
+__pycache__
+*.pyc
+.DS_STORE
