@@ -2,7 +2,7 @@ import boto3
 from time import sleep
 
 from asgebsmanager.mds_utils import get_imds_token, get_instance_metadata
-
+from asgebsmanager.file_utils import get_fs_util_for
 
 class AsgEbsManager:
 
@@ -130,6 +130,12 @@ class AsgEbsManager:
 
 def manage_ebs(args):
     try: 
+       # get fs_util
+        fs_util = get_fs_util_for(args.fs_type,args={
+            'device': args.device,
+            'mount_point': args.mount_point
+        })
+
         asg_ebs_manager = AsgEbsManager(region=args.region,asg_name=args.asg_name)
 
         # get the current instance az and id
@@ -146,9 +152,9 @@ def manage_ebs(args):
             # wait for some other volume to be available
             max_retries = args.check_timeout
             while volume_id is None and max_retries > 0:
-                    sleep(60)
-                    volume_id = asg_ebs_manager.latest_volume(az,'available')
-                    max_retries -= 1
+                sleep(60)
+                volume_id = asg_ebs_manager.latest_volume(az,'available')
+                max_retries -= 1
             if max_retries == 0:
                 volume_id = None
 
@@ -237,7 +243,13 @@ def manage_ebs(args):
             # if we are able to attach volume successfully to the instance, tag the volume 
             if volume_id is not None:
                 asg_ebs_manager.tag_resource(volume_id)
-                return
+
+            if fs_util.wait_for_device():
+                fs_util.format()
+                fs_util.mount()
+            else:
+                raise Exception(f"Unable to locate device {args.device}")
+            return
 
     # catch all 
     except Exception as e:
@@ -251,7 +263,7 @@ def manage_ebs(args):
             asg_ebs_manager.delete_volume(volume_id)
     except Exception as e:
         pass
-    
+
     # Exiting because we were not able to create or attach volume successfully
     exit(1)
 
