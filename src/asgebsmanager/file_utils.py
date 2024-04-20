@@ -23,6 +23,9 @@ class FsUtil(ABC):
     def mount(self):
         raise NotImplementedError()
     
+    @abstractmethod
+    def increase(self):
+        raise NotImplementedError()
 
 class XFSUtil(FsUtil):
 
@@ -31,20 +34,17 @@ class XFSUtil(FsUtil):
         self.mount_point = args["mount_point"]
 
     def format(self):
-        try:
-            is_xfs = os.system(f"blkid -t TYPE=xfs {self.device} > /dev/null 2>&1") == 0
-            if not is_xfs:
-                os.system(f"mkfs.xfs -f {self.device}")
-        except Exception as e:
-            print(f"An error occurred: {e}")
+        is_xfs = os.system(f"blkid -t TYPE=xfs {self.device} > /dev/null 2>&1") == 0
+        if not is_xfs:
+            os.system(f"mkfs.xfs -f {self.device}")
 
     def mount(self):
-        try:
-            if not os.path.exists(self.mount_point):
-                os.mkdir(self.mount_point)
-            uuid = os.popen(f"blkid -s UUID -o value {self.device}").read().strip()
-            with open('/etc/fstab', 'a') as f:
-                f.write(f"UUID={uuid}\t{self.mount_point}\txfs\tdefaults\t0\t0\n")
-            os.system(f"mount {self.device} {self.mount_point}")
-        except Exception as e:
-            print(f"An error occurred: {e}")
+        if not os.path.exists(self.mount_point):
+            os.mkdir(self.mount_point)
+        uuid = os.popen(f"blkid -s UUID -o value {self.device}").read().strip()
+        with open('/etc/fstab', 'a') as f:
+            f.write(f"UUID={uuid}\t{self.mount_point}\txfs\tdefaults\t0\t0\n")
+        os.system(f"mount {self.device} {self.mount_point}")
+
+    def increase(self):
+        os.system(f"xfs_growfs {self.mount_point} > /dev/null 2>&1")

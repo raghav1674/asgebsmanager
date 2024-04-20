@@ -185,7 +185,7 @@ def manage_ebs(args):
         if volume_id and args.force:
             volume = asg_ebs_manager.describe_volume(volume_id)
             snapshot_id = None
-            if volume['Size'] != args.size or volume['Iops'] != args.iops or volume['Throughput'] != args.throughput or az_diff:
+            if volume['Size'] < args.size or volume['Iops'] != args.iops or volume['Throughput'] != args.throughput or az_diff:
                 snapshot_id = asg_ebs_manager.create_snapshot(volume_id)
                 snapshot = asg_ebs_manager.describe_snapshot(snapshot_id)
                 max_retries = args.check_timeout
@@ -247,6 +247,7 @@ def manage_ebs(args):
             if fs_util.wait_for_device():
                 fs_util.format()
                 fs_util.mount()
+                fs_util.increase()
             else:
                 raise Exception(f"Unable to locate device {args.device}")
             return

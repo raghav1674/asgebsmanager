@@ -3,7 +3,7 @@ import os
 
 setup(
     name = 'asgebsmanager',
-    version = "1.5",
+    version = "1.5.3",
     author = 'Raghav Gupta',
     description = 'AWS Asg ebs manager',
     packages = find_packages("src"),
